@@ -1,10 +1,7 @@
 package com.smartassessment.bdevice;
 
 import android.Manifest;
-import android.bluetooth.BluetoothAdapter;
-import android.bluetooth.BluetoothDevice;
-import android.bluetooth.BluetoothServerSocket;
-import android.bluetooth.BluetoothSocket;
+import android.bluetooth.*;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.os.Build;
@@ -12,11 +9,7 @@ import android.util.Log;
 
 import androidx.core.app.ActivityCompat;
 
-import java.io.BufferedReader;
-import java.io.BufferedWriter;
-import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.IOException;
+import java.io.*;
 import java.util.UUID;
 
 public class RelayService {
@@ -36,52 +29,28 @@ public class RelayService {
     private static final UUID SPP_UUID =
             UUID.fromString("00001101-0000-1000-8000-00805F9B34FB");
 
-    private final BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
+    private BluetoothAdapter bt = BluetoothAdapter.getDefaultAdapter();
 
-    private volatile BluetoothSocket socketA;
-    private volatile BluetoothSocket socketC;
-
+    private volatile BluetoothSocket socketA, socketC;
     private volatile BufferedReader readerA, readerC;
     private volatile BufferedWriter writerA, writerC;
 
     private volatile boolean running = false;
+
+    private Thread threadA, threadC;
 
     private void log(String msg) {
         Log.d("RelayService", msg);
         if (callback != null) callback.onStatus(msg);
     }
 
-    // ======================================================
-    // PERMISSION CHECK UTILITIES
-    // ======================================================
-    private boolean hasBtConnectPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            return ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)
-                    == PackageManager.PERMISSION_GRANTED;
-        }
-        return true;
-    }
-
-    private boolean hasBtScanPermission() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            return ActivityCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN)
-                    == PackageManager.PERMISSION_GRANTED;
-        }
-        return true;
-    }
-
-    // ======================================================
-    // START RELAY – SAFE VERSION
-    // ======================================================
+    // ===============================
+    // START RELAY
+    // ===============================
     public void startRelay(String macC) {
 
-        if (!hasBtConnectPermission()) {
-            log("Bluetooth CONNECT permission missing!");
-            return;
-        }
-
-        if (!hasBtScanPermission()) {
-            log("Bluetooth SCAN permission missing!");
+        if (bt == null) {
+            log("Bluetooth not supported!");
             return;
         }
 
@@ -98,97 +67,75 @@ public class RelayService {
         closeSocket(socketC);
     }
 
-    // ======================================================
+    // ===============================
     // ACCEPT DEVICE A
-    // ======================================================
+    // ===============================
     private void acceptLoopA() {
         try {
-            if (!hasBtConnectPermission()) {
-                log("Missing BLUETOOTH_CONNECT permission for server socket.");
-                return;
-            }
-
             BluetoothServerSocket server =
                     bt.listenUsingRfcommWithServiceRecord("DeviceB", SPP_UUID);
 
-            log("Server socket opened, waiting for Device A...");
+            log("Waiting for Device A...");
 
             while (running) {
-                try {
-                    BluetoothSocket s = server.accept();
-
-                    if (s != null) {
-                        log("Accepted connection from A: " + s.getRemoteDevice().getAddress());
-                        closeSocket(socketA);
-                        socketA = s;
-                        setupAStreams();
-                    }
-
-                } catch (IOException e) {
-                    log("Accept failed: " + e.getMessage());
-                }
-
-                Thread.sleep(200);
-            }
-
-            try { server.close(); } catch (Exception ignored) {}
-
-        } catch (SecurityException se) {
-            log("SecurityException: Missing CONNECT permission!");
-        } catch (Exception e) {
-            log("Server socket open failed: " + e);
-        }
-    }
-
-    // ======================================================
-    // CONNECT TO DEVICE C (Client Mode)
-    // ======================================================
-    private void connectLoopC(String mac) {
-        while (running) {
-
-            if (!hasBtConnectPermission()) {
-                log("Cannot connect to C: Missing BLUETOOTH_CONNECT permission.");
-                return;
-            }
-
-            if (socketC != null && socketC.isConnected()) {
-                try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-                continue;
-            }
-
-            try {
-                log("Trying connect to C: " + mac);
-
-                BluetoothDevice devC = bt.getRemoteDevice(mac);
-
-                BluetoothSocket sC =
-                        devC.createRfcommSocketToServiceRecord(SPP_UUID);
 
                 bt.cancelDiscovery();
 
-                sC.connect();
+                BluetoothSocket s = server.accept();
 
-                log("Connected to C: " + mac);
+                if (s != null) {
+                    log("A connected: " + s.getRemoteDevice().getAddress());
+
+                    closeSocket(socketA);
+                    socketA = s;
+
+                    setupAStreams();
+                }
+            }
+
+        } catch (Exception e) {
+            log("Accept error: " + e.getMessage());
+        }
+    }
+
+    // ===============================
+    // CONNECT TO DEVICE C
+    // ===============================
+    private void connectLoopC(String mac) {
+        while (running) {
+
+            try {
+                if (socketC != null && socketC.isConnected()) {
+                    Thread.sleep(500);
+                    continue;
+                }
+
+                log("Connecting to C...");
+
+                BluetoothDevice dev = bt.getRemoteDevice(mac);
+                BluetoothSocket s =
+                        dev.createRfcommSocketToServiceRecord(SPP_UUID);
+
+                bt.cancelDiscovery();
+                s.connect();
+
+                log("Connected to C");
 
                 closeSocket(socketC);
-                socketC = sC;
+                socketC = s;
 
                 setupCStreams();
 
-            } catch (SecurityException se) {
-                log("SecurityException: Missing BT permission!");
-                return;
-
             } catch (Exception e) {
-                log("Connect to C failed: " + e.getMessage());
-                try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+                log("Retry C connection...");
+                try { Thread.sleep(2000); } catch (Exception ignored) {}
             }
         }
     }
 
-    // ======================================================
-    // STREAM SETUP
-    // ======================================================
+    // ===============================
+    // SETUP STREAMS
+    // ===============================
     private void setupAStreams() {
         try {
             readerA = new BufferedReader(
@@ -199,7 +146,7 @@ public class RelayService {
             startListenA();
 
         } catch (Exception e) {
-            log("setupAStreams error: " + e.getMessage());
+            log("A stream error");
             closeSocket(socketA);
         }
     }
@@ -214,71 +161,91 @@ public class RelayService {
             startListenC();
 
         } catch (Exception e) {
-            log("setupCStreams error: " + e.getMessage());
+            log("C stream error");
             closeSocket(socketC);
         }
     }
 
-    // ======================================================
+    // ===============================
     // LISTEN FROM A
-    // ======================================================
+    // ===============================
     private void startListenA() {
-        new Thread(() -> {
+
+        if (threadA != null && threadA.isAlive()) return;
+
+        threadA = new Thread(() -> {
             try {
                 String line;
-                while (running && readerA != null &&
+
+                while (running &&
+                        readerA != null &&
                         (line = readerA.readLine()) != null) {
 
                     log("A → B: " + line);
 
-                    if (writerC != null) {
-                        writerC.write(line + "\n");
-                        writerC.flush();
-                    } else {
-                        log("C not connected; cannot forward.");
+                    BufferedWriter w = writerC;
+                    if (w != null) {
+                        w.write(line + "\n");
+                        w.flush();
                     }
                 }
+
             } catch (Exception e) {
-                log("Lost connection from A: " + e.getMessage());
+                log("A disconnected");
             } finally {
                 closeSocket(socketA);
+                socketA = null;
+                readerA = null;
+                writerA = null;
             }
-        }).start();
+        });
+
+        threadA.start();
     }
 
-    // ======================================================
+    // ===============================
     // LISTEN FROM C
-    // ======================================================
+    // ===============================
     private void startListenC() {
-        new Thread(() -> {
+
+        if (threadC != null && threadC.isAlive()) return;
+
+        threadC = new Thread(() -> {
             try {
                 String line;
-                while (running && readerC != null &&
+
+                while (running &&
+                        readerC != null &&
                         (line = readerC.readLine()) != null) {
 
                     log("C → B: " + line);
 
-                    if (writerA != null) {
-                        writerA.write(line + "\n");
-                        writerA.flush();
-                    } else {
-                        log("A not connected; cannot forward.");
+                    BufferedWriter w = writerA;
+                    if (w != null) {
+                        w.write(line + "\n");
+                        w.flush();
                     }
                 }
 
             } catch (Exception e) {
-                log("Lost connection from C: " + e.getMessage());
+                log("C disconnected");
             } finally {
                 closeSocket(socketC);
+                socketC = null;
+                readerC = null;
+                writerC = null;
             }
-        }).start();
+        });
+
+        threadC.start();
     }
 
-    // ======================================================
-    // CLOSE SOCKET SAFELY
-    // ======================================================
+    // ===============================
+    // CLOSE SOCKET
+    // ===============================
     private void closeSocket(BluetoothSocket s) {
-        if (s == null) return;
-        try { s.close(); } catch (Exception ignored) {}
+        try {
+            if (s != null) s.close();
+        } catch (Exception ignored) {}
     }
 }
